@@ -2,6 +2,22 @@ export const config = {
   runtime: 'edge',
 };
 
+// Полный актуальный список подходящих для кода моделей
+const AVAILABLE_MODELS = [
+  // Модели с высоким лимитом (500 RPD) — рекомендуются для больших задач:
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  // Флагманы и свежие версии (20 RPD) — для точечных задач:
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "antigravity"
+];
+
 function cleanSchema(schema) {
   if (!schema || typeof schema !== "object") return schema;
   if (Array.isArray(schema)) return schema.map(cleanSchema);
@@ -27,12 +43,12 @@ export default async function handler(request) {
 
   const url = new URL(request.url);
 
+  // Возврат полного списка моделей в формате OpenAI
   if (request.method === "GET" && url.pathname.includes("/models")) {
-    const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
     return new Response(
       JSON.stringify({
         object: "list",
-        data: models.map(id => ({ id, object: "model" }))
+        data: AVAILABLE_MODELS.map(id => ({ id, object: "model" }))
       }),
       {
         status: 200,
@@ -55,7 +71,7 @@ export default async function handler(request) {
   if (request.method === "POST") {
     try {
       const body = await request.json();
-      let model = (body.model || "gemini-3.5-flash").replace(/^models\//, "");
+      let model = (body.model || "gemini-3.5-flash-lite").replace(/^models\//, "");
       const isStream = Boolean(body.stream);
 
       const contents = [];
@@ -151,7 +167,6 @@ export default async function handler(request) {
         });
       }
 
-      // Режим STREAMING (защита от 504 Gateway Timeout)
       if (isStream) {
         const { readable, writable } = new TransformStream();
         const writer = writable.getWriter();
@@ -239,7 +254,6 @@ export default async function handler(request) {
         });
       }
 
-      // Непотоковый режим (для коротких запросов)
       const gData = await gResponse.json();
       const candidate = gData.candidates?.[0]?.content;
       let assistantContent = null;
