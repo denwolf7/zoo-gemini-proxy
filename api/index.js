@@ -2,6 +2,19 @@ export const config = {
   runtime: 'edge',
 };
 
+function cleanSchema(schema) {
+  if (!schema || typeof schema !== "object") return schema;
+  if (Array.isArray(schema)) return schema.map(cleanSchema);
+
+  const newObj = {};
+  for (const [key, val] of Object.entries(schema)) {
+    // Gemini API отвергает additionalProperties и $schema
+    if (key === "additionalProperties" || key === "$schema") continue;
+    newObj[key] = cleanSchema(val);
+  }
+  return newObj;
+}
+
 export default async function handler(request) {
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -109,7 +122,7 @@ export default async function handler(request) {
             functionDeclarations.push({
               name: t.function.name,
               description: t.function.description || "",
-              parameters: t.function.parameters || { type: "OBJECT", properties: {} }
+              parameters: cleanSchema(t.function.parameters) || { type: "OBJECT", properties: {} }
             });
           }
         }
