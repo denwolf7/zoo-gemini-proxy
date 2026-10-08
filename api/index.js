@@ -8,7 +8,6 @@ function cleanSchema(schema) {
 
   const newObj = {};
   for (const [key, val] of Object.entries(schema)) {
-    // Gemini API отвергает additionalProperties и $schema
     if (key === "additionalProperties" || key === "$schema") continue;
     newObj[key] = cleanSchema(val);
   }
@@ -56,7 +55,8 @@ export default async function handler(request) {
   if (request.method === "POST") {
     try {
       const body = await request.json();
-      let model = (body.model || "gemini-2.5-flash").replace(/^models\//, "");
+      let model = (body.model || "gemini-3.5-flash").replace(/^models\//, "");
+      const isStream = Boolean(body.stream);
 
       const contents = [];
       let systemInstructionText = "";
@@ -131,7 +131,8 @@ export default async function handler(request) {
         }
       }
 
-      const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const endpoint = isStream ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=";
+      const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${endpoint}${apiKey}`;
 
       const gResponse = await fetch(targetUrl, {
         method: "POST",
@@ -139,10 +140,9 @@ export default async function handler(request) {
         body: JSON.stringify(geminiPayload),
       });
 
-      const gData = await gResponse.json();
-
       if (!gResponse.ok) {
-        return new Response(JSON.stringify(gData), {
+        const errText = await gResponse.text();
+        return new Response(errText, {
           status: gResponse.status,
           headers: {
             "Content-Type": "application/json",
@@ -151,6 +151,96 @@ export default async function handler(request) {
         });
       }
 
+      // Режим STREAMING (защита от 504 Gateway Timeout)
+      if (isStream) {
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        const encoder = new TextEncoder();
+
+        (async () => {
+          const reader = gResponse.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  const dataStr = line.replace(/^data: /, "").trim();
+                  if (!dataStr) continue;
+
+                  try {
+                    const parsed = JSON.parse(dataStr);
+                    const candidate = parsed.candidates?.[0]?.content;
+                    let delta = {};
+
+                    if (candidate?.parts) {
+                      for (const part of candidate.parts) {
+                        if (part.text) {
+                          delta.content = (delta.content || "") + part.text;
+                        }
+                        if (part.functionCall) {
+                          delta.tool_calls = delta.tool_calls || [];
+                          delta.tool_calls.push({
+                            index: 0,
+                            id: "call_" + Math.random().toString(36).substring(2, 11),
+                            type: "function",
+                            function: {
+                              name: part.functionCall.name,
+                              arguments: JSON.stringify(part.functionCall.args || {})
+                            }
+                          });
+                        }
+                      }
+                    }
+
+                    const chunk = {
+                      id: "chatcmpl-" + Date.now(),
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model: model,
+                      choices: [{ index: 0, delta: delta, finish_reason: null }]
+                    };
+
+                    await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+                  } catch (e) {}
+                }
+              }
+            }
+
+            const endChunk = {
+              id: "chatcmpl-" + Date.now(),
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: model,
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+            };
+            await writer.write(encoder.encode(`data: ${JSON.stringify(endChunk)}\n\ndata: [DONE]\n\n`));
+          } catch (err) {
+          } finally {
+            await writer.close();
+          }
+        })();
+
+        return new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
+
+      // Непотоковый режим (для коротких запросов)
+      const gData = await gResponse.json();
       const candidate = gData.candidates?.[0]?.content;
       let assistantContent = null;
       const toolCalls = [];
